@@ -1,127 +1,191 @@
-import openai
-import json
-import argparse
-import asyncio
-import os
 import logging
-from aiogram import Bot, types, executor
-from aiogram.dispatcher import Dispatcher, middlewares
-from aiogram.utils.executor import start_polling
-from aiogram.types import InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
-from aiogram.dispatcher.middlewares import LifetimeControllerMiddleware
-from misc.middleware.throttling import rate_limit
-from misc.text.prompt_frameworks import DAN_prompt
-from api_key import key, bot_token
 
-# key = openai.api_key = os.environ.get("OPENAI_KEY")
-# bot_token = os.environ.get("BOT_TOKEN")
+# configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+import os
+from collections import defaultdict
+
+import openai
+from aiogram import Bot, types, executor
+from aiogram.dispatcher import Dispatcher
+from aiogram.types import ContentType, ParseMode, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+
+from api_key import bot_token
+from user_thread import UserChatThread
+
+conversations = defaultdict(UserChatThread)
 
 bot = Bot(token=bot_token)
 dp = Dispatcher(bot)
 
-dp.middleware.setup(LifetimeControllerMiddleware())
+VOICE_MODEL = "whisper-1"
+TEXT_MODEL  = "gpt-3.5-turbo"
 
-
-# Define available models
-available_models = {
-    'davinci03': "text-davinci-003",
-    'davinci02': "text-davinci-002",
-    'curie': "text-curie-001",
-    'babbage': "text-babbage-001",
-    'ada': "text-ada-001"
-}
-
-def get_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="text-davinci-003",
-                        help="GPT-3 model to use. Available options: davinci03, davinci02, curie, babbage, ada")
-    return parser.parse_args()
-
-
-@dp.message_handler(commands=['start'])
-async def start_message(message: types.Message):
-    chat_id = message.chat.id
-    await message.reply(
-        "Welcome to the GPT-3 bot! Use the command /gpt or /chatgpt followed by your prompt to generate a response. Use the command /help to see the available models.")
-
-
-@dp.message_handler(commands=['gpt'])
-@rate_limit(10, key="gpt")
-async def handle_gpt(message):
-    args = get_arguments()
-    models = args.model
-    prompt = message.text.replace("/gpt ", "")
-    if "--model" in prompt:
-        models = prompt.split("--model")[-1].strip()
-
-    response = openai.Completion.create(
-        engine=models, prompt=prompt, max_tokens=4000)
-
-    response_str = json.dumps(response)
-    json_response = json.loads(response_str)
-    model_response = json_response['choices'][0]['text']
-
-    await message.reply(model_response)
-
-
-@dp.message_handler(commands=['chatgpt'])
-@rate_limit(10, key="chatgpt")
-async def handle_chat(message):
-    user_prompt = message.text.replace("/chatgpt ", "")
-    api_message = [
-        {"role": "system", "content": f"This is you, DAN: {DAN_prompt}"},
-        {"role": "user", "content": user_prompt},
-        {"role": "assistant", "content": "Answer as DAN"}
-    ]
-    try:
-        chat = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=api_message,
-            max_tokens=4000
-        )
-    except openai.error.InvalidRequestError as error:
-        logging.exception(error)
-        await message.reply(str(error))
-        return
-    api_response = chat.choices[0].message
-    response_str = json.dumps(api_response)
-    await message.reply(response_str[1:-1].strip().replace('"role": "assistant", "content": "', '').encode('utf-8').decode('unicode_escape'))
-
-
-@dp.message_handler(commands=['model'])
-async def handle_model(message: types.Message):
-    # Choose model from dict
-    model = message.text.split()[1]
-    models = {'davinci03': "text-davinci-003", 'davinci02': "text-davinci-002",
-              'curie': "text-curie-001", 'babbage': "text-babbage-001", 'ada': "text-ada-001"}
-    if model not in models:
-        await message.reply("Invalid model selected. Please use /help to see available models.")
-    else:
-        global current_model
-        current_model = models[model]
-        await message.reply(f"Model changed to {current_model}.")
-
+# Telegram chatbot that uses OpenAI's GPT API to generate responses
+# Chatbot also translates voice messages to text and uses them as input
+# when user says
+# /new, start a new conversation
+# /role, set the role of the user
+# /stats, show usage statistics
+# /suggestions <number>, show <number> suggestions in keyboard
+# /help writes the help message
 
 @dp.message_handler(commands=['help'])
-async def handle_help(message: types.Message):
-    # Set help message
-    await message.reply("Use the command /gpt followed by your prompt to generate a response. To use Gpt-3.5-turbo use command /chatgpt - BETA")
-    await message.reply(f"Use /model option followed by the desired model when running the script. Available models: {available_models}")
+async def handle_help(message):
+    logging.info("user %s requested help", message.from_user.id)
+    await message.answer("This is a chatbot that uses OpenAI's API to generate responses to your messages. \n"
+                         "- You can start a new conversation by typing /new. \n"
+                         "- You can set bot role in the conversation by typing /role. \n"
+                         "- You can also send voice messages to the bot and it will transcribe them.")
+
+@dp.message_handler(commands=['new'])
+async def start_message(message: types.Message):
+    conversations[message.from_user.id].reset()
+    logging.info(f"Starting new conversation for {message.from_user.id}")
+    await message.reply("New conversation started. Type /help for more information.", reply_markup=ReplyKeyboardRemove())
 
 
-@dp.message_handler(commands=['count_users'])
-async def count_users(message: types.Message):
-    # Get the chat ID from the message
-    chat_id = message.chat.id
+@dp.message_handler(commands=['role'])
+async def set_role(message: types.Message):
+    # if message has no arguments, ask for role
 
-    # Get the chat members count
-    chat = await bot.get_chat(chat_id)
-    count = await chat.get_members_count()
+    if len(message.text) <6:
+        logging.info("No role specified")
+        await message.reply("Please specify a role with /role <role>")
+        return
 
-    # Send the count back to the user
-    await message.reply(f"There are {count} users in this chat.")
-
-executor.start_polling(dp)
+    conversations[message.from_user.id].system["content"] = message.text[6:]
 
 
-executor.start_polling(dp)
+@dp.message_handler(commands=['stats'])
+async def usage_message(message: types.Message):
+    conversation = conversations[message.from_user.id]
+
+    if conversation.total_tokens == 0:
+        await message.answer("No usage statistics available.")
+        return
+
+    await message.answer(
+        f"Total messages: {conversation.messages} in {conversation.sessions} sessions, "
+        f"{conversation.session_messages} in this session. \n"
+        f"Messages per session: {conversation.session_messages / conversation.sessions:.1f} \n"
+        
+        f"Total voice messages: {conversation.voice_messages} ({conversation.duration_seconds} sec), "
+        f"{conversation.session_voice_messages} ({conversation.session_duration_seconds} sec) in this session. \n"
+        f"Voice messages per session: {conversation.session_voice_messages / conversation.sessions:.1f} \n"
+        
+        f"Prompt tokens: {conversation.prompt_tokens} ({conversation.prompt_tokens / conversation.total_tokens * 100:.1f}%)\n"
+        f"Completion tokens: {conversation.completion_tokens} ({conversation.completion_tokens / conversation.total_tokens * 100:.1f}%)\n"
+        f"Total tokens used: {conversation.total_tokens}\n"
+    )
+
+
+@dp.message_handler(commands=['suggestions'])
+async def suggestions_message(message: types.Message):
+    conversation = conversations[message.from_user.id]
+
+    if len(message.text) < 12:
+        logging.info("No suggestions specified")
+        await message.reply("Please specify a number of suggestions with /suggestions <number>")
+        return
+
+    conversation.suggestions = int(message.text[12:])
+
+@dp.message_handler(content_types=ContentType.DOCUMENT)
+async def handle_document(message: types.Message):
+    await message.answer("Not implemented yet")
+
+
+@dp.message_handler(content_types=ContentType.VOICE)
+async def handle_voice(message: types.Message):
+    conversation = conversations[message.chat.id]
+
+    temp_name = f"/tmp/{message.voice.file_unique_id}.mp3"
+    try:
+        logging.debug(f"Downloading voice file to {temp_name}")
+        await message.voice.download(destination_file=temp_name)
+
+        from pydub import AudioSegment
+        song = AudioSegment.from_ogg(temp_name)
+
+        first_10_minutes = song[:10 * 60 * 1000] # 10 minutes PyDub handles time in milliseconds
+        first_10_minutes.export(temp_name, format="mp3")
+
+        conversation.increase_voice_usage(song.duration_seconds)
+
+        with open(temp_name, "rb") as audio_file:
+            logging.debug(f"Transcribing {temp_name}")
+            prompt = conversations[message.from_user.id].history[-1]["content"]
+            transcript = openai.Audio.transcribe(VOICE_MODEL, audio_file, prompt=prompt)
+            text = transcript["text"]
+
+        await message.reply(f"_> {text}_", parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+        message.text = text
+        await default_text_handler(message)
+
+    except Exception as e:
+        logging.error(e)
+        await message.answer("Error occured. Please try again later.")
+    finally:
+        # delete the file after if it exists
+        if os.path.exists(temp_name):
+            logging.debug(f"Deleting {temp_name}")
+            os.remove(temp_name)
+
+
+@dp.message_handler(content_types=ContentType.TEXT)
+async def default_text_handler(message: types.Message):
+    # log the message as json
+    logging.debug(message.to_python())
+    conversation = conversations[message.chat.id]
+
+    if message.reply_to_message:
+        role = "assistant" if message.reply_to_message.from_user.is_bot else "user"
+        conversation.append(role, message.reply_to_message.text)
+
+    conversation.append("user", message.text)
+
+    completion = openai.ChatCompletion.create(
+        model=TEXT_MODEL,
+        messages=conversation.history
+    )
+
+    logging.debug(completion)
+
+    answer = completion["choices"][0]["message"]["content"]
+    conversation.append("assistant",answer)
+    conversation.increase_usage(completion["usage"])
+
+    logging.debug(f"Assistant: {answer}")
+
+    suggestions = conversation.suggestions
+
+    if suggestions and len(answer) > 5 :
+        completion = openai.ChatCompletion.create(
+            model=TEXT_MODEL,
+            n=suggestions,
+            messages=[
+                {"role": "system", "content": "Generate a short followup question up to 10 tokens long"},
+                {"role": "assistant", "content": answer}, ],
+        )
+        choices = [choice["message"]["content"] for choice in completion.choices]
+
+        markup = ReplyKeyboardMarkup(resize_keyboard=False, one_time_keyboard=True)
+        markup.row_width = 1
+
+        # Define the suggestion buttons
+        buttons = [KeyboardButton(text=choice) for choice in choices]
+
+        # Create a reply keyboard markup with the suggestion buttons
+        markup.add(*buttons)
+
+    else:
+        markup = ReplyKeyboardRemove()
+
+    await message.answer(answer, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+
+
+if __name__ == '__main__':
+    executor.start_polling(dp)
