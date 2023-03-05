@@ -1,18 +1,18 @@
 # openai-telegram-bot
-This is a Telegram bot that utilizes the OpenAI GPT-3 API to generate responses based on user prompts. The bot can be controlled using the following commands:
 
-/gpt followed by the prompt: This will generate a response using the current model. The user can also specify a different model by including --model [model_name] in the prompt.
+ Telegram chatbot that uses OpenAI's GPT API to generate responses
+ Chatbot also translates voice messages to text and uses them as input
+ when user says
+- /new, start a new conversation
+- /role, set the role of the user
+- /stats, show usage statistics
+- /suggestions <number>, show <number> suggestions in keyboard
+- /help writes the help message
 
-/chatgpt followed by the prompt: BETA chatgpt model.
 
-/model [model_name]: This changes the current model to the specified model. 
-The available models are: 
-* text-davinci-003
-* text-davinci-002
-* text-curie-001
-* text-babbage-001
+VOICE_MODEL = "whisper-1"
+TEXT_MODEL  = "gpt-3.5-turbo"
 
-/help: This displays information on how to use the bot and lists the available models.
 
 # Screenshot
 ![Capture](https://user-images.githubusercontent.com/86234226/222886181-b24ba6ac-9486-45d0-94c4-08b804dfb215.PNG)
@@ -25,12 +25,10 @@ You will also need to install the following Python packages:
 ```
 openai
 aiogram
-asyncio
+pydub
 ```
-You can install these packages using pip:
-```
-pip install openai aiogram json
-```
+
+also you will need to install ffmpeg to convert voice messages to format that Whisper can transcribe to text
 
 # Usage
 1. Clone this repository to your local machine.
@@ -44,11 +42,22 @@ key = "YOUR_API_KEY"
 ```
 python openaitelegram.py
 ```
-6. Start a conversation with the bot on Telegram and use the command !gpt followed by your message to receive a response from the GPT-3 engine.
-7. To exit the script, you can use the command !gpt exit
+6. Start a conversation with the bot on Telegram 
+7. use /new command to start a new conversation.
+
+
+# To Do
+- [x] Add basic statistics
+- [x] Add suggestions keyboard
+- [x] Add incoming voice messages support
+- [ ] Add feedback pool
+- [ ] Add outgoing voice messages support
+- [ ] Add web-site summary and Q&A
+- [ ] Add document Q&A using langchain
 
 # Note
 You need to run this script on a server so that it can run 24/7, otherwise it will run only when you run the script on your local machine.
+Works on my Raspberry Pi 2 Model B
 
 # Additional Resources
 [Telethon documentation](https://docs.telethon.dev/en/stable/index.html#)
@@ -56,12 +65,6 @@ You need to run this script on a server so that it can run 24/7, otherwise it wi
 [OpenAI API documentation](https://beta.openai.com/docs/guides/completion/introduction)
 
 [Creating a Telegram bot](https://core.telegram.org/bots)
-
-# Limitations
-
-* This script is using GPT3 model, so the response will be based on the content that model was trained on.
-
-* This script is not hosted on Heroku or other hosting platform.
 
 # License
 This script is licensed under the MIT license. Feel free to use and modify it for your own projects
