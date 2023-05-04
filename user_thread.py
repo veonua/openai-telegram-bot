@@ -27,7 +27,7 @@ class UserChatThread():
         self.history = [self.system]
         self.last_message_time = 0
         self.history_trim = 10
-        self.suggestions = 3
+        self.suggestions = 0
 
         self.completion_tokens = 0
         self.prompt_tokens = 0
