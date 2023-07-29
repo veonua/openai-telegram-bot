@@ -12,8 +12,8 @@ from aiogram.dispatcher import Dispatcher
 from aiogram.types import ContentType, ParseMode, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatActions
 
 from api_key import bot_token, engine, bot_name, DEFAULT_MODEL
-from user_thread import UserChatThread
-from text_utils import is_markdown
+from user_thread import UserChatThread, ModelStats
+from text_utils import entities_extract, fetch_url, is_markdown
 
 conversations = defaultdict(UserChatThread)
 
@@ -66,12 +66,20 @@ async def set_role(message: types.Message):
 async def usage_message(message: types.Message):
     conversation = conversations[message.from_user.id]
 
-    if conversation.total_tokens == 0:
+    if len(conversation.models) == 0:
         await message.answer("No usage statistics available.")
         return
 
+    answer = ""
+    total_messages = 0
+    for name, value in conversation.models.items():
+        stats: ModelStats = value
+        total_messages += stats.messages
+        answer += f"**{name}**:\n {stats.str()}\n"
+        
+
     await message.answer(
-        f"Total messages: {conversation.messages} in {conversation.sessions} sessions, "
+        f"Total messages: {total_messages} in {conversation.sessions} sessions, "
         f"{conversation.session_messages} in this session. \n"
         f"Messages per session: {conversation.session_messages / conversation.sessions:.1f} \n"
 
@@ -79,9 +87,7 @@ async def usage_message(message: types.Message):
         f"{conversation.session_voice_messages} ({conversation.session_duration_seconds} sec) in this session. \n"
         f"Voice messages per session: {conversation.session_voice_messages / conversation.sessions:.1f} \n"
 
-        f"Prompt tokens: {conversation.prompt_tokens} ({conversation.prompt_tokens / conversation.total_tokens * 100:.1f}%)\n"
-        f"Completion tokens: {conversation.completion_tokens} ({conversation.completion_tokens / conversation.total_tokens * 100:.1f}%)\n"
-        f"Total tokens used: {conversation.total_tokens}\n"
+        f"{answer}\n"
     )
 
 
@@ -147,6 +153,10 @@ async def gpt4(message: types.Message):
     await default_text_handler(message, model=GPT4_MODEL)
 
 
+@dp.message_handler(content_types=ContentType.UNKNOWN)
+async def handle_unknown(message: types.Message):
+    await message.answer("Unknown content type.")
+
 @dp.message_handler(content_types=ContentType.TEXT)
 async def default_text_handler(message: types.Message, model: str = DEFAULT_MODEL):
     try:
@@ -154,6 +164,9 @@ async def default_text_handler(message: types.Message, model: str = DEFAULT_MODE
     except Exception as e:
         logging.error(e)
         await message.answer("Error occured. Please try again later.\n"+str(e))
+
+        conversation = conversations[message.chat.id]
+        conversation.increase_error(model)
 
 
 async def text_handler(message: types.Message, model=DEFAULT_MODEL):
@@ -164,17 +177,27 @@ async def text_handler(message: types.Message, model=DEFAULT_MODEL):
     message_text = message.text
     mentioned = False
     if message.entities:
+        ee = entities_extract(message_text, message.entities)
         # Filter the entities to keep only mentions
-        mentions_entities = filter(lambda entity: entity["type"] == "mention", message.entities)
-
-        # Map the entities to extract the mention text from the message
-        mentions = list(
-            map(lambda entity: message_text[entity["offset"] + 1:entity["offset"] + entity["length"]],
-                mentions_entities))
-
-        if bot_name in mentions:
+        mentions = ee["mention"] # entities_extract(message_text, message.entities, "mention")
+        
+        pref_name = "@"+bot_name
+        if pref_name in mentions:
             mentioned = True
-            message_text = message_text.replace(f"@{bot_name}", "")
+            message_text = message_text.replace(pref_name, "")
+
+        # Filter the entities to keep only mentions
+        url_entities = ee["url"]
+        if url_entities:
+            for url_entity in url_entities:
+                try:
+                    res = fetch_url(url_entity)
+                    message_text = message_text.replace(url_entity, '"'+ res.text_content + '"')
+                except Exception as e:
+                    logging.error(e)
+                    #await message.answer("Error occured. Please try again later.\n"+str(e))
+
+ 
 
     if message_text.startswith("https://t.me/"):
         await message.reply("Please don't send links to other chats.")
@@ -202,7 +225,7 @@ async def text_handler(message: types.Message, model=DEFAULT_MODEL):
 
     answer = completion["choices"][0]["message"]["content"]
     conversation.append("assistant", answer)
-    conversation.increase_usage (model= model, usage= completion["usage"])
+    conversation.increase_message_usage (model= model, usage= completion["usage"])
 
     logging.debug(f"Assistant: {answer}")
 

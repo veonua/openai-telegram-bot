@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 
 # UserChatThread Class
 
@@ -27,6 +28,13 @@ class ModelStats():
         self.total_tokens = 0
         self.sessions = 1
         self.messages = 0
+        self.errors = 0
+
+    def str(self):
+        return (f"Total messages: {self.messages}\n"
+        f"Prompt tokens: {self.prompt_tokens} ({self.prompt_tokens / self.total_tokens * 100:.1f}%)\n"
+        f"Completion tokens: {self.completion_tokens} ({self.completion_tokens / self.total_tokens * 100:.1f}%)\n"
+        f"Total tokens used: {self.total_tokens}\n")
         
 class UserChatThread():
     def __init__(self):
@@ -37,9 +45,8 @@ class UserChatThread():
         self.history_trim = 10
         self.suggestions = 0
 
-        self.models = {}
+        self.models = defaultdict(ModelStats)
         self.sessions = 1
-        self.messages = 0
         self.voice_messages = 0
         self.duration_seconds = 0
         self.session_messages = 0
@@ -86,16 +93,18 @@ class UserChatThread():
         self.voice_messages += 1
         self.session_voice_messages += 1
 
-    def increase_usage(self, model:str, usage:dict):
+    def increase_message_usage(self, model:str, usage:dict):
         """
         Increases the usage statistics.
         :param usage: a dictionary object representing the usage statistics.
         """
-        if model not in self.models:
-            self.models[model] = ModelStats()
         model_stats : ModelStats = self.models[model]
         model_stats.prompt_tokens += usage["prompt_tokens"]
         model_stats.completion_tokens += usage["completion_tokens"]
         model_stats.total_tokens += usage["total_tokens"]
         model_stats.messages += 1
         self.session_messages += 1
+
+    def increase_error(self, model:str):
+        self.models[model].errors += 1
+        
