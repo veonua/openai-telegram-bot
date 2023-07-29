@@ -11,8 +11,9 @@ from aiogram import Bot, types, executor
 from aiogram.dispatcher import Dispatcher
 from aiogram.types import ContentType, ParseMode, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatActions
 
-from api_key import bot_token, engine, bot_name
+from api_key import bot_token, engine, bot_name, DEFAULT_MODEL
 from user_thread import UserChatThread
+from text_utils import is_markdown
 
 conversations = defaultdict(UserChatThread)
 
@@ -20,7 +21,7 @@ bot = Bot(token=bot_token)
 dp = Dispatcher(bot)
 
 VOICE_MODEL = "whisper-1"
-
+GPT4_MODEL = "gpt-4"
 
 # Telegram chatbot that uses OpenAI's GPT API to generate responses
 # Chatbot also translates voice messages to text and uses them as input
@@ -54,7 +55,8 @@ async def set_role(message: types.Message):
 
     if len(message.text) < 6:
         logging.info("No role specified")
-        await message.reply("Please specify a role with /role <role>")
+        current_role = conversations[message.from_user.id].system["content"]    
+        await message.reply(f"Please specify a role with /role <role>\n'{current_role}' is the current role.")
         return
 
     conversations[message.from_user.id].system["content"] = message.text[6:]
@@ -140,17 +142,21 @@ async def handle_voice(message: types.Message):
             os.remove(temp_name)
 
 
+@dp.message_handler(commands=['gpt4'])
+async def gpt4(message: types.Message):
+    await default_text_handler(message, model=GPT4_MODEL)
+
+
 @dp.message_handler(content_types=ContentType.TEXT)
-async def default_text_handler(message: types.Message):
+async def default_text_handler(message: types.Message, model: str = DEFAULT_MODEL):
     try:
-        await text_handler(message)
+        await text_handler(message, model)
     except Exception as e:
         logging.error(e)
-        await message.answer("Error occured. Please try again later.")
+        await message.answer("Error occured. Please try again later.\n"+str(e))
 
 
-async def text_handler(message: types.Message):
-    # log the message as json
+async def text_handler(message: types.Message, model=DEFAULT_MODEL):
     logging.debug(message.to_python())
     conversation = conversations[message.chat.id]
     is_private = message.chat.type == types.ChatType.PRIVATE
@@ -188,6 +194,7 @@ async def text_handler(message: types.Message):
 
     completion = await openai.ChatCompletion.acreate(
         engine=engine,
+        model=model,
         messages=conversation.history
     )
 
@@ -195,7 +202,7 @@ async def text_handler(message: types.Message):
 
     answer = completion["choices"][0]["message"]["content"]
     conversation.append("assistant", answer)
-    conversation.increase_usage(completion["usage"])
+    conversation.increase_usage (model= model, usage= completion["usage"])
 
     logging.debug(f"Assistant: {answer}")
 
@@ -205,6 +212,7 @@ async def text_handler(message: types.Message):
         await message.answer_chat_action(ChatActions.CHOOSE_STICKER)
         completion = openai.ChatCompletion.create(
             engine=engine,
+            model=model,
             n=suggestions,
             messages=[
                 {"role": "system", "content": "Generate a short followup question up to 10 tokens long"},
@@ -223,7 +231,8 @@ async def text_handler(message: types.Message):
     else:
         markup = ReplyKeyboardRemove()
 
-    await message.answer(answer, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+    parse_mode=ParseMode.MARKDOWN if is_markdown(answer) else None    
+    await message.answer(answer, parse_mode=parse_mode, reply_markup=markup)
 
 
 if __name__ == '__main__':

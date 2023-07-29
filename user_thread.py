@@ -20,6 +20,14 @@ import time
 # - session_voice_messages: an integer value representing the number of voice messages sent in the current conversation session.
 # - session_duration_seconds: a float value representing the total duration of voice messages sent in the current conversation session.
 
+class ModelStats():
+    def __init__(self):
+        self.completion_tokens = 0
+        self.prompt_tokens = 0
+        self.total_tokens = 0
+        self.sessions = 1
+        self.messages = 0
+        
 class UserChatThread():
     def __init__(self):
         print("UserChatThread init")
@@ -29,9 +37,7 @@ class UserChatThread():
         self.history_trim = 10
         self.suggestions = 0
 
-        self.completion_tokens = 0
-        self.prompt_tokens = 0
-        self.total_tokens = 0
+        self.models = {}
         self.sessions = 1
         self.messages = 0
         self.voice_messages = 0
@@ -51,7 +57,7 @@ class UserChatThread():
         :return:
         """
 
-        if time.time() - self.last_message_time > 3600:
+        if time.time() - self.last_message_time > 60 * 10: # 10 minutes
             self.history = [self.system]
 
         self.history.append({"role": role, "content": content})
@@ -70,7 +76,7 @@ class UserChatThread():
         self.session_duration_seconds = 0
         self.session_voice_messages = 0
 
-    def increase_voice_usage(self, duration_seconds):
+    def increase_voice_usage(self, duration_seconds:float):
         """
         Increases the voice usage statistics.
         :param duration_seconds: a float value representing the duration of the voice message in seconds.
@@ -80,13 +86,16 @@ class UserChatThread():
         self.voice_messages += 1
         self.session_voice_messages += 1
 
-    def increase_usage(self, usage):
+    def increase_usage(self, model:str, usage:dict):
         """
         Increases the usage statistics.
         :param usage: a dictionary object representing the usage statistics.
         """
-        self.prompt_tokens += usage["prompt_tokens"]
-        self.completion_tokens += usage["completion_tokens"]
-        self.total_tokens += usage["total_tokens"]
-        self.messages += 1
+        if model not in self.models:
+            self.models[model] = ModelStats()
+        model_stats : ModelStats = self.models[model]
+        model_stats.prompt_tokens += usage["prompt_tokens"]
+        model_stats.completion_tokens += usage["completion_tokens"]
+        model_stats.total_tokens += usage["total_tokens"]
+        model_stats.messages += 1
         self.session_messages += 1
