@@ -14,7 +14,7 @@ def entities_extract(message_text:str, entities) -> Dict[str, Set[str]]:
 class ReaderResult:
     def __init__(self, kind: str, text_content: str, title: str, byline: str, length: int, excerpt: str, site_name: str, language: str):
         self.kind = kind
-        self.text_content = text_content
+        self.text_content = text_content.strip()
         self.title = title
         self.byline = byline
         self.length = length

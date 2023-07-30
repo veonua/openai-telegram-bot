@@ -53,7 +53,7 @@ class UserChatThread():
         self.session_voice_messages = 0
         self.session_duration_seconds = 0
 
-    def append(self, role, content):
+    def append(self, role:str, content:str):
         """
         Appends a message to the conversation history.
         If the length of history attribute exceeds history_trim, it removes the first element of the list.
@@ -71,6 +71,17 @@ class UserChatThread():
         self.last_message_time = time.time()
         if len(self.history) > self.history_trim:
             self.history.pop(1)
+
+    def prune(self, current_tokens:int, max_tokens:int)->bool:
+        """
+        Prunes the conversation history to fit the maximum number of tokens allowed.
+        :param current_tokens: an integer value representing the current number of tokens used in the conversation.
+        :param max_tokens: an integer value representing the maximum number of tokens allowed in the conversation.
+        """
+        if len(self.history) < 2:
+            return False
+        self.history.pop(1)
+        return True
 
     def reset(self):
         """

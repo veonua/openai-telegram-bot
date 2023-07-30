@@ -4,12 +4,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 import os
+import re
 from collections import defaultdict
 
 import openai
 from aiogram import Bot, types, executor
 from aiogram.dispatcher import Dispatcher
 from aiogram.types import ContentType, ParseMode, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, ChatActions
+from aiogram.utils.exceptions import CantParseEntities
 
 from api_key import bot_token, engine, bot_name, DEFAULT_MODEL
 from user_thread import UserChatThread, ModelStats
@@ -22,6 +24,8 @@ dp = Dispatcher(bot)
 
 VOICE_MODEL = "whisper-1"
 GPT4_MODEL = "gpt-4"
+GPT4_MAX_TOKENS = 8000
+
 
 # Telegram chatbot that uses OpenAI's GPT API to generate responses
 # Chatbot also translates voice messages to text and uses them as input
@@ -153,9 +157,16 @@ async def gpt4(message: types.Message):
     await default_text_handler(message, model=GPT4_MODEL)
 
 
-@dp.message_handler(content_types=ContentType.UNKNOWN)
-async def handle_unknown(message: types.Message):
-    await message.answer("Unknown content type.")
+@dp.message_handler(content_types=ContentType.STICKER)
+async def handle_sticker(message: types.Message):
+    emoji = message.sticker.emoji
+
+    if emoji == '👍' or '👌':
+        await message.answer("thanks!")
+    elif emoji == '👎':
+        await message.answer("sorry to hear that")
+        
+    await message.answer(emoji)
 
 @dp.message_handler(content_types=ContentType.TEXT)
 async def default_text_handler(message: types.Message, model: str = DEFAULT_MODEL):
@@ -171,38 +182,52 @@ async def default_text_handler(message: types.Message, model: str = DEFAULT_MODE
 
 async def text_handler(message: types.Message, model=DEFAULT_MODEL):
     logging.debug(message.to_python())
+
+    context = {
+        "user_name": message.from_user.username,
+        "first_name": message.from_user.first_name,
+        "id": message.from_user.id,
+        "is_bot": message.from_user.is_bot,
+        "language_code": message.from_user.language_code,
+        "date": message.date,
+        "location": message.chat.location, # None
+    }
+
     conversation = conversations[message.chat.id]
     is_private = message.chat.type == types.ChatType.PRIVATE
 
     message_text = message.text
+    
     mentioned = False
     if message.entities:
-        ee = entities_extract(message_text, message.entities)
+        entities = entities_extract(message_text, message.entities)
         # Filter the entities to keep only mentions
-        mentions = ee["mention"] # entities_extract(message_text, message.entities, "mention")
+        mentions = entities["mention"] # entities_extract(message_text, message.entities, "mention")
         
         pref_name = "@"+bot_name
         if pref_name in mentions:
             mentioned = True
             message_text = message_text.replace(pref_name, "")
 
+        if message_text.startswith("/gpt4 "):
+            message_text = message_text[6:]
+
         # Filter the entities to keep only mentions
-        url_entities = ee["url"]
+        url_entities = entities["url"]
         if url_entities:
             for url_entity in url_entities:
+                if url_entity.startswith("https://t.me/"):
+                    await message.reply("Please don't send links to other chats.")
+                    return
+
                 try:
                     res = fetch_url(url_entity)
-                    message_text = message_text.replace(url_entity, '"'+ res.text_content + '"')
+                    message_text = message_text.replace(url_entity, '\n>>'+ res.text_content )
                 except Exception as e:
                     logging.error(e)
                     #await message.answer("Error occured. Please try again later.\n"+str(e))
 
  
-
-    if message_text.startswith("https://t.me/"):
-        await message.reply("Please don't send links to other chats.")
-        return
-
     await message.answer_chat_action(ChatActions.TYPING)
     if message.reply_to_message:
         role = "assistant" if message.reply_to_message.from_user.is_bot else "user"
@@ -215,23 +240,25 @@ async def text_handler(message: types.Message, model=DEFAULT_MODEL):
     if not mentioned and not is_private:
         return
 
-    completion = await openai.ChatCompletion.acreate(
-        engine=engine,
-        model=model,
-        messages=conversation.history
-    )
+    completion = await complete(model, conversation, model_switch_for_bigger_context = True) 
 
     logging.debug(completion)
 
     answer = completion["choices"][0]["message"]["content"]
+    finish_reason = completion["choices"][0]["finish_reason"]
+
+    if finish_reason == "length":
+        answer += u"\u2026"
+
     conversation.append("assistant", answer)
-    conversation.increase_message_usage (model= model, usage= completion["usage"])
+    conversation.increase_message_usage (model= completion["model"], usage= completion["usage"])
 
     logging.debug(f"Assistant: {answer}")
 
     suggestions = conversation.suggestions
-
-    if suggestions and len(answer) > 5:
+    if not suggestions or len(answer) <= 5:
+        markup = ReplyKeyboardRemove()
+    else:
         await message.answer_chat_action(ChatActions.CHOOSE_STICKER)
         completion = openai.ChatCompletion.create(
             engine=engine,
@@ -251,11 +278,47 @@ async def text_handler(message: types.Message, model=DEFAULT_MODEL):
         buttons = [KeyboardButton(text=choice) for choice in choices]
         markup.add(*buttons)
 
-    else:
-        markup = ReplyKeyboardRemove()
+    try:
+        await message.answer(answer, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+    except CantParseEntities as e:
+        logging.warning(e)
+        await message.answer(answer, reply_markup=markup)
 
-    parse_mode=ParseMode.MARKDOWN if is_markdown(answer) else None    
-    await message.answer(answer, parse_mode=parse_mode, reply_markup=markup)
+
+async def complete(model, conversation, model_switch_for_bigger_context=False):
+    from openai.error import InvalidRequestError, RateLimitError
+
+    try:
+        completion = await openai.ChatCompletion.acreate(
+            engine=engine,
+            model=model,
+            messages=conversation.history
+        )
+    except InvalidRequestError as e:
+        user_message = e.user_message
+
+        # parse message using regex to get the number of tokens
+        #  "This model's maximum context length is 4097 tokens. However, your messages resulted in 7894 tokens. Please reduce the length of the messages."
+        match = re.search(r"maximum context length is (\d+) tokens. However, your messages resulted in (\d+) tokens", user_message)
+        if not match:
+            raise e
+        
+        max_tokens = int(match.group(1))
+        message_tokens = int(match.group(2))
+        
+        if model_switch_for_bigger_context and model == DEFAULT_MODEL and message_tokens < 16000:
+            return await complete("gpt-3.5-turbo-16k", conversation, model_switch_for_bigger_context=False)
+
+        if not conversation.prune(message_tokens, max_tokens):
+            raise e
+        
+        # Retry if conversation is pruned
+        return await complete(model, conversation)
+    
+    except RateLimitError as e:
+        raise e
+        
+    return completion
 
 
 if __name__ == '__main__':
